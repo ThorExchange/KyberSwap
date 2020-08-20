@@ -1,138 +1,130 @@
 import React from "react"
 import { connect } from "react-redux"
 import {TransferBody} from "../Transfer"
-//import {GasConfig} from "../TransactionCommon"
-import {AdvanceConfigLayout, GasConfig} from "../../components/TransactionCommon"
-
-
-import {TransactionLayout} from "../../components/TransactionCommon"
 import { getTranslate } from 'react-localize-redux'
-
-import * as converter from "../../utils/converter"
 import * as validators from "../../utils/validators"
 import * as transferActions from "../../actions/transferActions"
-import { default as _ } from 'underscore'
-import { clearSession } from "../../actions/globalActions"
+import EthereumService from "../../services/ethereum/ethereum"
+import constants from "../../services/constants"
+import { hideSelectToken } from "../../actions/utilActions";
+import * as globalActions from "../../actions/globalActions";
+import * as common from "../../utils/common";
 
-@connect((store) => {
-  var langs = store.locale.languages
-  const currentLang = langs.map((item) => {
-    if (item.active) {
-      return item.code
-    }
-  })
+@connect((store, props) => {
   const account = store.account.account
-  if (account === false) {
-    if (currentLang[0] === 'en') {
-      window.location.href = "/swap"  
-    } else {
-      window.location.href = `/swap?lang=${currentLang}`
-    }
-  }
-  var translate = getTranslate(store.locale)
+  const translate = getTranslate(store.locale)
   const tokens = store.tokens.tokens
   const transfer = store.transfer
-  return {
-      translate, transfer, tokens, currentLang
-    }  
-})
+  const analytics = store.global.analytics
 
+  return {
+    translate, transfer, tokens, account, analytics,
+    params: {...props.match.params}
+  }
+})
 
 export default class Exchange extends React.Component {
   constructor(props){
     super(props)
     this.state = {
-      selectedGas: props.transfer.gasPrice <= 20? "f": "s", 
+      isAnimation: false,
+      intervalGroup : []
+    }
+  }
+  getEthereumInstance = () => {
+    var ethereum = this.props.ethereum
+    if (!ethereum){
+      ethereum = new EthereumService()
+    }
+    return ethereum
+  }
+
+  componentWillUnmount = () => {
+    for (var i= 0; i<this.state.intervalGroup.length; i++ ){
+      clearInterval(this.state.intervalGroup[i])
+    }
+    this.setState({intervalGroup: []})
+  }
+
+  setInterValGroup = (callback, intervalTime) => {
+    callback()
+    var intevalProcess = setInterval(callback, intervalTime)
+    this.state.intervalGroup.push(intevalProcess)
+  }
+
+  fetchGasTransfer = () => {
+    if (!this.props.account) {
+      return
+    }
+    var ethereum = this.getEthereumInstance()
+    this.props.dispatch(transferActions.estimateGasTransfer(ethereum))
+  }
+
+  verifyTransfer = () => {
+    if (!this.props.account) {
+      return
+    }
+    this.props.dispatch(transferActions.verifyTransfer())
+  }
+
+  setInvervalProcess = () => {
+    this.setInterValGroup( this.fetchGasTransfer, 10000)
+    this.setInterValGroup( this.verifyTransfer, 3000)
+  }
+
+
+  setAnimation = () => {
+    this.setState({isAnimation: true})
+  }
+
+
+  componentDidMount = () =>{
+    this.setInvervalProcess()
+    if (this.props.params.source.toLowerCase() !== this.props.transfer.tokenSymbol.toLowerCase()){
+
+      var sourceSymbol = this.props.params.source.toUpperCase()
+      var sourceAddress = this.props.tokens[sourceSymbol].address
+
+      this.props.dispatch(transferActions.selectToken(sourceSymbol, sourceAddress))
     }
   }
 
   validateSourceAmount = (value, gasPrice) => {
-    var checkNumber
     if (isNaN(parseFloat(value))) {
-      // this.props.dispatch(transferActions.thowErrorAmount("error.amount_must_be_number"))
     } else {
-      var amountBig = converters.stringEtherToBigNumber(this.props.transfer.amount, this.props.transfer.decimal)
+      var amountBig = converters.stringEtherToBigNumber(this.props.transfer.amount, this.props.transfer.decimals)
       if (amountBig.isGreaterThan(this.props.transfer.balance)) {
-        this.props.dispatch(transferActions.thowErrorAmount("error.amount_transfer_too_hign"))
+        this.props.dispatch(transferActions.throwErrorAmount(constants.TRANSFER_CONFIG.sourceErrors.input, this.props.translate("error.amount_transfer_too_hign")))
         return
       }
 
       var testBalanceWithFee = validators.verifyBalanceForTransaction(this.props.tokens['ETH'].balance,
         this.props.transfer.tokenSymbol, this.props.transfer.amount, this.props.transfer.gas, gasPrice)
       if (testBalanceWithFee) {
-        this.props.dispatch(transferActions.thowErrorEthBalance("error.eth_balance_not_enough_for_fee"))
+        this.props.dispatch(transferActions.throwErrorAmount(constants.TRANSFER_CONFIG.sourceErrors.balance, this.props.translate("error.eth_balance_not_enough_for_fee")))
       }
     }
-   
-
-  }
-
-  lazyUpdateValidateSourceAmount = _.debounce(this.validateSourceAmount, 500)
-
-
-
-  // specifyGasPrice = (value) => {
-  //   this.props.dispatch(transferActions.specifyGasPrice(value))
-
-  //   this.lazyUpdateValidateSourceAmount(this.props.transfer.amount, value)
-  // }
-
-
-  specifyGasPrice = (value) => {
-    this.props.dispatch(transferActions.specifyGasPrice(value))
-
-    this.lazyUpdateValidateSourceAmount(this.props.transfer.amount, value)
-  }
-
-  inputGasPriceHandler = (value) => {
-    this.setState({selectedGas: "undefined"})
+    this.props.dispatch(transferActions.seSelectedGas(level))
     this.specifyGasPrice(value)
+    this.props.analytics.callTrack("trackChooseGas", "transfer", value, level);
   }
 
-  selectedGasHandler = (value, level) => {
-    this.setState({selectedGas: level})
-    this.specifyGasPrice(value)
-  }
+  setSrcToken = (symbol, address, type) => {
+    this.props.dispatch(transferActions.selectToken(symbol, address));
+    this.props.dispatch(hideSelectToken());
 
-  handleEndSession = () => {
-    this.props.dispatch(clearSession()) 
-  }
+    let path = constants.BASE_HOST + "/transfer/" + symbol.toLowerCase();
+    path = common.getPath(path, constants.LIST_PARAMS_SUPPORTED);
+
+    this.props.dispatch(globalActions.goToRoute(path));
+    this.props.analytics.callTrack("trackChooseToken", type, symbol);
+  };
 
   render() {
-    var gasPrice = converter.stringToBigNumber(converter.gweiToEth(this.props.transfer.gasPrice))
-    var totalGas = gasPrice.multipliedBy(this.props.transfer.gas)
-    var page = "transfer"
-    var gasConfig = (
-      <GasConfig 
-        gas={this.props.transfer.gas}
-        gasPrice={this.props.transfer.gasPrice}
-        maxGasPrice={this.props.transfer.maxGasPrice}
-        gasHandler={this.specifyGas}
-        inputGasPriceHandler={this.inputGasPriceHandler}
-        selectedGasHandler={this.selectedGasHandler}
-        gasPriceError={this.props.transfer.errors.gasPriceError}
-        gasError={this.props.transfer.errors.gasError}
-        totalGas={totalGas.toString()}
-        translate={this.props.translate}        
-        gasPriceSuggest={this.props.transfer.gasPriceSuggest}    
-        selectedGas = {this.state.selectedGas}
-        page = {page}
-      />
-    )
-
-    var advanceConfig = <AdvanceConfigLayout gasConfig = {gasConfig} translate = {this.props.translate}/>
-    var transferBody = <TransferBody advanceLayout = {advanceConfig}/>
     return (
-      <TransactionLayout 
-        endSession = {this.handleEndSession}
-        translate = {this.props.translate}
-        //location = {this.props.location}
-       
-       // advance = {advanceConfig}
-        content = {transferBody}
-        page = {page}
-        currentLang = {this.props.currentLang}
-      />
+      <div className={"exchange__container"}>
+        <TransferBody setSrcToken={this.setSrcToken}/>
+      </div>
     )
   }
 }
